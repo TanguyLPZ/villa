@@ -59,17 +59,20 @@ jobs:
             uv pip freeze --python "$venv_python"
             "$venv_python" -c "import fit, fit_data, torch; print(torch.__version__, torch.cuda.is_available())"
           '
-      - name: Compare Offset configurations in both directions
+      - name: Compare Offset and mesh regularization in both directions
         timeout-minutes: 15
         run: |
           docker exec offset-bench /tmp/offset-venv/bin/python \
-            /workspace/validation/offset/run_offset_cpu.py --work /benchmark/data
+            /workspace/validation/offset/run_offset_cpu.py --work /benchmark/data \
+            --configs shipped offset-dominant offset-with-smooth offset-with-bend
       - name: Plot a registered CT cross-section through the fitted meshes
         timeout-minutes: 6
         run: |
           docker exec offset-bench uv pip install --python /tmp/offset-venv/bin/python matplotlib
-          docker exec offset-bench /tmp/offset-venv/bin/python \
-            /workspace/validation/offset/offset_cross_section.py --work /benchmark/data
+          for candidate in offset-with-smooth offset-with-bend; do
+            docker exec offset-bench /tmp/offset-venv/bin/python \
+              /workspace/validation/offset/offset_cross_section.py --work /benchmark/data --candidate "$candidate"
+          done
       - name: Attach the measurements to the run summary
         if: always()
         run: |

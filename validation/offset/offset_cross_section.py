@@ -54,6 +54,8 @@ def intersect_grid(xyz, z, bounds):
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--work", required=True, type=Path)
+    cli.add_argument("--candidate", default="offset-dominant",
+                     choices=("offset-dominant", "offset-with-smooth", "offset-with-bend"))
     args = cli.parse_args()
     root = args.work
     plan = json.loads((root / "plan.json").read_text())
@@ -63,7 +65,7 @@ def main():
     target, target_valid = read_surface(root / "w031.tifxyz")
     target[~target_valid] = -1
     shipped = fitted_mesh(root, window, "shipped")
-    candidate = fitted_mesh(root, window, "offset-dominant")
+    candidate = fitted_mesh(root, window, args.candidate)
     surfaces = (start, shipped, candidate)
     points = np.concatenate([mesh.reshape(-1, 3) for mesh in surfaces])
     low = int(np.ceil(max(mesh[..., 2].min() for mesh in surfaces)))
@@ -110,13 +112,13 @@ def main():
     handles = [Line2D([0], [0], color=colors[k], linestyle="-" if k == "fit" else "--", label=label)
                for k, label in (("w030", "Traced start (w030)"), ("w031", "Traced target (w031)"), ("fit", "Fitted mesh"))]
     axes[1].legend(handles=handles, loc="upper right", fontsize=7, framealpha=0.9)
-    output = root / "PHerc0139_offset_cross_section.png"
-    figure.savefig(output, dpi=120)
+    output = root / f"PHerc0139_{args.candidate}_cross_section.png"
+    figure.savefig(output, dpi=110, pil_kwargs={"optimize": True})
     plt.close(figure)
-    print(f"OFFSET_CT scan={volume.id} z={z} xyz_bounds={bounds} pixel_size_um={volume.pixel_size_um}")
+    print(f"OFFSET_CT {args.candidate} scan={volume.id} z={z} xyz_bounds={bounds} pixel_size_um={volume.pixel_size_um}")
     encoded = b64encode(output.read_bytes()).decode("ascii")
     for i in range(0, len(encoded), 1800):
-        print(f"OFFSET_PNG {i} {encoded[i:i + 1800]}")
+        print(f"OFFSET_PNG {args.candidate} {i} {encoded[i:i + 1800]}")
 
 
 if __name__ == "__main__":

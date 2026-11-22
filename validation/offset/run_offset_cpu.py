@@ -26,6 +26,7 @@ CASES = {
     "reverse": {"start": "w031", "opposite": "w032", "target": "w030", "beyond": "w029", "column_fraction": 0.3},
 }
 CANDIDATES = ("shipped", "offset-dominant", "station-in-refinement", "offset-snap-pr2418")
+SHAPE_CANDIDATES = {"offset-with-smooth": ("smooth", 40.0), "offset-with-bend": ("bend", 400.0)}
 
 
 def write_json(path, value):
@@ -135,6 +136,13 @@ def score(xyz, start, sign, references, target):
     start_normals = projections(start)
     movement = (xyz - start) * start_normals
     opposed_normals = (projections(xyz) * start_normals).sum(axis=-1) < 0
+    opposed_triangles = 0
+    corner = np.s_[:-1, :-1]
+    diagonal = np.s_[1:, 1:]
+    for edges in ((np.s_[1:, :-1], diagonal), (diagonal, np.s_[:-1, 1:])):
+        before = np.cross(start[edges[0]] - start[corner], start[edges[1]] - start[corner])
+        after = np.cross(xyz[edges[0]] - xyz[corner], xyz[edges[1]] - xyz[corner])
+        opposed_triangles += int(((before * after).sum(axis=-1) < 0).sum())
     return {
         "vertices": len(flat),
         "nearest_counts": {name: int((winners == i).sum()) for i, name in enumerate(names)},
@@ -142,6 +150,7 @@ def score(xyz, start, sign, references, target):
         "median_move_toward_target": round(float(np.median(sign * movement.sum(axis=-1))), 3),
         "max_displacement": round(float(np.max(np.linalg.norm(xyz - start, axis=-1))), 3),
         "opposed_vertex_normals": int(opposed_normals.sum()),
+        "opposed_triangles": opposed_triangles,
     }
 
 
@@ -216,11 +225,14 @@ def fit_window(root, plan, window, name, dense_cache, steps):
     config = json.loads(config_path.read_text())
     mesh = root / window["mesh"]
     config["external_surfaces"] = [{"path": str(mesh), "offset": window["offset"]}]
-    if name in {"offset-dominant", "station-in-refinement"}:
+    if name in {"offset-dominant", "station-in-refinement", *SHAPE_CANDIDATES}:
         config["base"].update(station_n=0.0, ext_offset=1.0)
     if name == "station-in-refinement":
         config["base"]["station_n"] = 0.001
         config["stages"][0]["w_fac"]["station_n"] = 0.0
+    if name in SHAPE_CANDIDATES:
+        term, weight = SHAPE_CANDIDATES[name]
+        config["base"][term] = weight
     config["voxel_size_um"] = 2.399
     if steps is not None:
         for stage in config["stages"]:
@@ -254,6 +266,7 @@ def main():
     parser.add_argument("--work", required=True, type=Path)
     parser.add_argument("--fixtures-only", action="store_true")
     parser.add_argument("--smoke-steps", type=int)
+    parser.add_argument("--configs", nargs="+", choices=(*CANDIDATES, *SHAPE_CANDIDATES), default=CANDIDATES)
     args = parser.parse_args()
     root = args.work.resolve()
     plan, refs = prepare(root)
@@ -272,7 +285,7 @@ def main():
         case = CASES[window["direction"]]
         cache = {}
         rows = [{"window": window["name"], "target": case["target"], "config": "start", **window["control"]}]
-        for name in CANDIDATES:
+        for name in args.configs:
             before = monotonic()
             grid = fit_window(root, plan, window, name, cache, args.smoke_steps)
             result = score(grid, start, window["offset"], refs, case["target"])
@@ -287,12 +300,13 @@ def main():
     if summary:
         lines = ["## Lasagna Offset on PHerc. 139", "",
                  "Assignment uses the nearest vertex among four published reference surfaces.", "",
-                 "| ROI | Target | Config | w029 | w030 | w031 | w032 | Median distance to target (voxels) | Opposed normals |",
-                 "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+                 "| ROI | Target | Config | w029 | w030 | w031 | w032 | Median distance to target (voxels) | Opposed normals | Opposed triangles |",
+                 "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
         for r in results:
             counts = [str(r["nearest_counts"][name]) for name in MESHES]
             lines.append("| " + " | ".join([r["window"], r["target"], r["config"], *counts,
-                                          str(r["median_distance_to_target"]), str(r["opposed_vertex_normals"])]) + " |")
+                                          str(r["median_distance_to_target"]), str(r["opposed_vertex_normals"]),
+                                          str(r["opposed_triangles"])]) + " |")
         with open(summary, "a", encoding="utf-8") as stream:
             stream.write("\n".join(lines) + "\n")
 
