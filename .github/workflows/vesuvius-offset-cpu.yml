@@ -39,6 +39,9 @@ jobs:
               command -v uv >/dev/null || {
                 curl --fail --show-error --silent --location https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
               }
-              python3 scripts/bootstrap_venv.py --venv /tmp/offset-venv --backend cpu
+              apt-get update -qq
+              apt-get install -q -y --no-install-recommends python3.14-dev
+              export CMAKE_BUILD_PARALLEL_LEVEL=2
+              python3 scripts/bootstrap_venv.py --python /usr/bin/python3.14 --venv /tmp/offset-venv --backend cpu
               /tmp/offset-venv/bin/python -c "import fit, fit_data, torch; print(torch.__version__, torch.cuda.is_available())"
             '
