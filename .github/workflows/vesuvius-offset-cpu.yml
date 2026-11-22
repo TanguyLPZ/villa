@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: vesuvius-offset-cpu-benchmark
+  group: vesuvius-offset-cpu-lean
   cancel-in-progress: true
 
 jobs:
@@ -31,7 +31,7 @@ jobs:
 
   fit:
     runs-on: ubuntu-24.04
-    timeout-minutes: 42
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,8 +50,15 @@ jobs:
               }
               apt-get update -qq
               apt-get install -q -y --no-install-recommends python3.14-dev
-              export CMAKE_BUILD_PARALLEL_LEVEL=2
-              python3 scripts/bootstrap_venv.py --python /usr/bin/python3.14 --venv /tmp/offset-venv --backend cpu
+              export CC=gcc-15 CXX=g++-15 CMAKE_BUILD_PARALLEL_LEVEL=3
+              uv venv --python /usr/bin/python3.14 /tmp/offset-venv
+              venv_python=/tmp/offset-venv/bin/python
+              uv pip install --python "$venv_python" --index-url https://download.pytorch.org/whl/cpu torch==2.11.0 torchvision==0.26.0
+              uv pip install --python "$venv_python" numpy scipy tifffile imagecodecs opencv-python-headless scikit-image requests pyyaml
+              CMAKE_ARGS=-DVC_READER_ENABLE_CUDA=OFF uv pip install --python "$venv_python" -e /workspace/vc_reader
+              uv pip install --python "$venv_python" --no-deps -e /workspace/lasagna
+              uv pip freeze --python "$venv_python"
+              PYTHONUNBUFFERED=1 "$venv_python" -c "import fit, fit_data, torch; print(torch.__version__, torch.cuda.is_available())"
               /tmp/offset-venv/bin/python /workspace/validation/offset/run_offset_cpu.py --work /benchmark/data
             '
       - name: Attach the measurements to the run summary
