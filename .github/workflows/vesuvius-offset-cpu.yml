@@ -9,32 +9,41 @@ permissions:
   contents: read
 
 concurrency:
-  group: vesuvius-offset-cpu
+  group: vesuvius-offset-cpu-benchmark
   cancel-in-progress: true
 
 jobs:
   inputs:
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Verify public PHerc. 139 mesh and field metadata
+      - name: Verify public mesh and prediction-field metadata
         run: python3 validation/offset/offset_inputs.py
+      - name: Select test windows from the traced meshes
+        run: |
+          python3 -m venv "$RUNNER_TEMP/offset-fixtures"
+          "$RUNNER_TEMP/offset-fixtures/bin/python" -m pip install 'numpy<3' 'scipy<2' 'tifffile<2027'
+          "$RUNNER_TEMP/offset-fixtures/bin/python" validation/offset/run_offset_cpu.py \
+            --work "$RUNNER_TEMP/offset-data" --fixtures-only
 
-  cpu-environment:
+  fit:
     runs-on: ubuntu-24.04
-    timeout-minutes: 28
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Load the pinned public Villa dependency image
         run: docker pull ghcr.io/scrollprize/villa/volume-cartographer@sha256:9407753393547c422c9689cb8da6b6f4415cc91ad8fa4d89eb476a3df540d7f8
-      - name: Set up the repository CPU environment and import the fitter
+      - name: Run the Lasagna Offset comparison on CPU
         run: |
+          mkdir -p "$RUNNER_TEMP/offset-fit"
           docker run --rm --cpus 4 -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$RUNNER_TEMP/offset-fit:/benchmark" \
+            -e GITHUB_STEP_SUMMARY=/benchmark/summary.md \
             -w /workspace/lasagna ghcr.io/scrollprize/villa/volume-cartographer@sha256:9407753393547c422c9689cb8da6b6f4415cc91ad8fa4d89eb476a3df540d7f8 bash -euo pipefail -c '
               command -v uv >/dev/null || {
                 curl --fail --show-error --silent --location https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
@@ -43,5 +52,11 @@ jobs:
               apt-get install -q -y --no-install-recommends python3.14-dev
               export CMAKE_BUILD_PARALLEL_LEVEL=2
               python3 scripts/bootstrap_venv.py --python /usr/bin/python3.14 --venv /tmp/offset-venv --backend cpu
-              /tmp/offset-venv/bin/python -c "import fit, fit_data, torch; print(torch.__version__, torch.cuda.is_available())"
+              /tmp/offset-venv/bin/python /workspace/validation/offset/run_offset_cpu.py --work /benchmark/data
             '
+      - name: Attach the measurements to the run summary
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/offset-fit/summary.md"; then
+            cat "$RUNNER_TEMP/offset-fit/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
