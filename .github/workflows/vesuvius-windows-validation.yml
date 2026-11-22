@@ -37,10 +37,27 @@ jobs:
           update: true
           cache: false
           install: git
-          pacboy: >-
-            gcc:p cmake:p ninja:p pkgconf:p qt6-base:p qt6-svg:p opencv:p
-            ceres-solver:p cgal:p gmp:p mpfr:p boost:p eigen3:p nlohmann-json:p
-            curl:p libtiff:p zlib:p zstd:p lz4:p blosc:p nsis:p concurrentqueue:p blosc2:p
+
+      - name: Install UCRT64 build dependencies
+        shell: msys2 {0}
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          packages=(
+            gcc cmake ninja pkgconf qt6-base qt6-svg opencv ceres-solver cgal
+            gmp mpfr boost eigen3 nlohmann-json curl libtiff zlib zstd lz4
+            blosc nsis concurrentqueue blosc2
+          )
+          for index in "${!packages[@]}"; do
+            packages[index]="mingw-w64-ucrt-x86_64-${packages[index]}"
+          done
+          for attempt in 1 2 3; do
+            if pacman -S --needed --noconfirm --disable-download-timeout "${packages[@]}"; then
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          exit 1
 
       - name: Build and test the original and patched VC3D tools
         shell: msys2 {0}
