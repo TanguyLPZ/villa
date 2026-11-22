@@ -82,6 +82,13 @@ jobs:
           g++ --version
           cmake --version
 
+          ucrt_prefix="$(cygpath -am /ucrt64)"
+          blosc2_pc="$(cygpath -u "$(pkg-config --path blosc2)")"
+          test -f "$blosc2_pc"
+          # Normalize any absolute MSYS2 paths in the runner package metadata.
+          sed -i "s@=/ucrt64@=$ucrt_prefix@g; s@-I/ucrt64@-I$ucrt_prefix@g; s@-L/ucrt64@-L$ucrt_prefix@g; s@\"/ucrt64@\"$ucrt_prefix@g" "$blosc2_pc"
+          pkg-config --cflags --libs blosc2
+
           (
             cd volume-cartographer
             cmake --preset ci-windows-mingw -DVC_TESTING=ON -DVC_USE_SCCACHE=OFF
