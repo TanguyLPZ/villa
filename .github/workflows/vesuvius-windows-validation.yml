@@ -1,0 +1,81 @@
+name: Vesuvius Windows validation
+
+on:
+  push:
+    branches: [vesuvius-windows-validation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vesuvius-windows-validation
+  cancel-in-progress: true
+
+jobs:
+  native:
+    runs-on: windows-2025
+    timeout-minutes: 150
+    env:
+      BASE_COMMIT: 0bddf2757ea1e97572e86d06d448d8e4a7e207b3
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      CCACHE_DISABLE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: '3.12'
+      - name: Install TIFF decoder
+        run: python -m pip install --disable-pip-version-check Pillow
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          cache: false
+          install: git
+          pacboy: >-
+            gcc:p cmake:p ninja:p pkgconf:p qt6-base:p qt6-svg:p opencv:p
+            ceres-solver:p cgal:p gmp:p mpfr:p boost:p eigen3:p nlohmann-json:p
+            curl:p libtiff:p zlib:p zstd:p lz4:p blosc:p nsis:p concurrentqueue:p blosc2:p
+
+      - name: Build and test the original and patched VC3D tools
+        shell: msys2 {0}
+        env:
+          VC_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          python="$(cygpath -u "$VC_PYTHON")"
+          validation=validation/vesuvius
+          build_dir=volume-cartographer/build/ci-windows-mingw
+          evidence=.vesuvius-evidence
+          changes=(
+            volume-cartographer/apps/src/vc_render_tifxyz.cpp
+            volume-cartographer/core/test/test_render_tifxyz_logging.py
+            volume-cartographer/core/src/SurfaceMeshing.cpp
+            volume-cartographer/core/include/vc/core/util/SurfaceMeshing.hpp
+            volume-cartographer/core/test/test_surface_meshing.cpp
+          )
+
+          git fetch --depth=1 --no-tags https://github.com/ScrollPrize/villa.git "$BASE_COMMIT"
+          git restore --source="$BASE_COMMIT" -- "${changes[@]}"
+          g++ --version
+          cmake --version
+
+          (
+            cd volume-cartographer
+            cmake --preset ci-windows-mingw -DVC_TESTING=ON -DVC_USE_SCCACHE=OFF
+          )
+          cmake --build "$build_dir" --parallel 3 --target \
+            vc_render_tifxyz vc_cache_root vc_tifxyz2obj vc_obj2tifxyz test_surface_meshing
+
+          "$python" "$validation/check_native.py" "$build_dir/bin" "$evidence" before
+          git restore --source=HEAD -- "${changes[@]}"
+          cmake --build "$build_dir" --parallel 3 --target \
+            vc_render_tifxyz vc_cache_root vc_tifxyz2obj vc_obj2tifxyz test_surface_meshing
+          ctest --test-dir "$build_dir" --no-tests=error --output-on-failure -R '^test_surface_meshing$'
+          "$python" volume-cartographer/core/test/test_render_tifxyz_logging.py "$build_dir/bin/vc_render_tifxyz.exe"
+          "$python" "$validation/check_native.py" "$build_dir/bin" "$evidence" after
