@@ -1,0 +1,24 @@
+name: Vesuvius Offset CPU benchmark
+
+on:
+  push:
+    branches: [vesuvius-offset-cpu]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vesuvius-offset-cpu
+  cancel-in-progress: true
+
+jobs:
+  inputs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify public PHerc. 139 mesh and field metadata
+        run: python3 validation/offset/offset_inputs.py
