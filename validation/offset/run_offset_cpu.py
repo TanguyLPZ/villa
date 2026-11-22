@@ -21,11 +21,11 @@ from offset_inputs import MESHES, MESH_FILES, field_manifest, request, url
 
 ROOT = Path(__file__).resolve().parents[2]
 WINDOW = (10, 20)
-CANDIDATES = {
-    "shipped": {},
-    "offset-dominant": {"station_n": 0.0, "ext_offset": 1.0},
-    "offset-with-station": {"station_n": 0.001, "ext_offset": 0.1},
+CASES = {
+    "forward": {"start": "w030", "opposite": "w029", "target": "w031", "beyond": "w032", "column_fraction": 0.5},
+    "reverse": {"start": "w031", "opposite": "w032", "target": "w030", "beyond": "w029", "column_fraction": 0.3},
 }
+CANDIDATES = ("shipped", "offset-dominant", "station-in-refinement", "offset-snap-pr2418")
 
 
 def write_json(path, value):
@@ -73,16 +73,17 @@ def projections(xyz):
     return normals / np.maximum(length, 1e-8)
 
 
-def select_windows(xyz, valid, references):
+def select_windows(xyz, valid, references, case):
     """Choose one interior window per row band using traced geometry alone."""
     height, width = WINDOW
     rows, cols = valid.shape
+    center_col = (cols - width) * case["column_fraction"]
     bands = np.linspace(0, rows, 4, dtype=int)
     for band, (lo, hi) in enumerate(zip(bands[:-1], bands[1:]), 1):
         candidates = [(row, col) for row in range(lo + 4, hi - height - 4, 12)
                       for col in range(4, cols - width - 4, 12)]
         candidates.sort(key=lambda p: (p[0] - (lo + hi - height) / 2) ** 2
-                        + (p[1] - (cols - width) / 2) ** 2)
+                        + (p[1] - center_col) ** 2)
         for row, col in candidates:
             index = np.s_[row:row + height, col:col + width]
             if not valid[index].all():
@@ -91,17 +92,17 @@ def select_windows(xyz, valid, references):
             flat = points.reshape(-1, 3)
             normals = projections(points).reshape(-1, 3)
             offsets = {}
-            for name in ("w029", "w031", "w032"):
-                tree = references[name]
+            for role in ("opposite", "target", "beyond"):
+                tree = references[case[role]]
                 dist, nearest = tree.query(flat)
                 delta = tree.data[nearest] - flat
-                offsets[name] = (delta * normals).sum(axis=-1)
-                if name == "w031":
+                offsets[role] = (delta * normals).sum(axis=-1)
+                if role == "target":
                     target_distance = dist
-            sign = 1 if np.median(offsets["w031"]) > 0 else -1
-            target = sign * offsets["w031"]
-            opposite = -sign * offsets["w029"]
-            beyond = sign * offsets["w032"]
+            sign = 1 if np.median(offsets["target"]) > 0 else -1
+            target = sign * offsets["target"]
+            opposite = -sign * offsets["opposite"]
+            beyond = sign * offsets["beyond"]
             if (np.quantile(target, 0.1) >= 16
                     and np.quantile(opposite, 0.1) >= 12
                     and np.quantile(beyond - target, 0.1) >= 8
@@ -112,32 +113,35 @@ def select_windows(xyz, valid, references):
             print(f"OFFSET_NO_WINDOW band={band} rows={lo}:{hi}", flush=True)
 
 
-def write_window(folder, xyz, scale, base_shape, row, col):
+def write_window(folder, xyz, scale, base_shape, source, row, col):
     folder.mkdir(exist_ok=True)
     for i, axis in enumerate("xyz"):
         tifffile.imwrite(folder / f"{axis}.tif", xyz[..., i].astype(np.float32))
     write_json(folder / "meta.json", {
-        "uuid": str(uuid5(NAMESPACE_URL, url(MESHES["w030"]) + f"#{row},{col}")),
+        "uuid": str(uuid5(NAMESPACE_URL, url(MESHES[source]) + f"#{row},{col}")),
         "name": folder.name, "type": "seg", "format": "tifxyz", "scale": scale,
         "base_shape_zyx": base_shape,
         "bbox": [xyz.min(axis=(0, 1)).tolist(), xyz.max(axis=(0, 1)).tolist()],
     })
 
 
-def score(xyz, start, sign, references):
+def score(xyz, start, sign, references, target):
     if xyz.shape != start.shape or not np.isfinite(xyz).all() or not (xyz > 0).all():
         raise ValueError(f"Expected a finite fitted grid matching {start.shape}, got {xyz.shape}")
     flat = xyz.reshape(-1, 3)
     names = list(references)
     distances = np.stack([references[name].query(flat)[0] for name in names])
     winners = np.argmin(distances, axis=0)
-    movement = (xyz - start) * projections(start)
+    start_normals = projections(start)
+    movement = (xyz - start) * start_normals
+    opposed_normals = (projections(xyz) * start_normals).sum(axis=-1) < 0
     return {
         "vertices": len(flat),
         "nearest_counts": {name: int((winners == i).sum()) for i, name in enumerate(names)},
-        "median_distance_to_w031": round(float(np.median(distances[names.index("w031")])), 3),
-        "median_move_toward_w031": round(float(np.median(sign * movement.sum(axis=-1))), 3),
+        "median_distance_to_target": round(float(np.median(distances[names.index(target)])), 3),
+        "median_move_toward_target": round(float(np.median(sign * movement.sum(axis=-1))), 3),
         "max_displacement": round(float(np.max(np.linalg.norm(xyz - start, axis=-1))), 3),
+        "opposed_vertex_normals": int(opposed_normals.sum()),
     }
 
 
@@ -147,39 +151,41 @@ def prepare(root):
     refs = {}
     for name in MESHES:
         xyz, valid = read_surface(root / f"{name}.tifxyz")
-        if name == "w030":
-            start_xyz, start_valid = xyz, valid
         refs[name] = cKDTree(xyz[valid])
         print(f"OFFSET_MESH {name} shape={xyz.shape} usable={int(valid.sum())}", flush=True)
 
     key, field = field_manifest()
     manifest = root / PurePosixPath(key).name
     write_json(manifest, field)
-    meta = json.loads((root / "w030.tifxyz" / "meta.json").read_text())
     windows = []
-    for band, row, col, xyz, sign, target_distance in select_windows(start_xyz, start_valid, refs):
-        folder = root / f"roi-{band}.tifxyz"
-        write_window(folder, xyz, meta["scale"], field["base_shape_zyx"], row, col)
-        # The two field scales are 8 and 16. Align the dense crop to both.
-        low = 16 * np.floor((xyz.min(axis=(0, 1)) - 256) / 16).astype(int)
-        high = 16 * np.ceil((xyz.max(axis=(0, 1)) + 256) / 16).astype(int)
-        window = {"band": band, "row": row, "col": col, "mesh": folder.name,
-                  "crop_xyzwhd": [*low.tolist(), *(high - low).tolist()], "offset": sign,
-                  "start_distance_to_w031": round(target_distance, 3)}
-        control = score(xyz, xyz, sign, refs)
-        if control["nearest_counts"]["w030"] != xyz.shape[0] * xyz.shape[1]:
-            raise ValueError(f"Invalid start reference for {window}: {control}")
-        window["control"] = control
-        print("OFFSET_WINDOW " + json.dumps(window), flush=True)
-        windows.append(window)
-    if not windows:
-        raise ValueError("No fully traced w030 window with separated nearest references")
+    for direction, case in CASES.items():
+        source = root / f'{case["start"]}.tifxyz'
+        meta = json.loads((source / "meta.json").read_text())
+        start_xyz, start_valid = read_surface(source)
+        for band, row, col, xyz, sign, target_distance in select_windows(start_xyz, start_valid, refs, case):
+            name = f"{direction}-{band}"
+            folder = root / f"{name}.tifxyz"
+            write_window(folder, xyz, meta["scale"], field["base_shape_zyx"], case["start"], row, col)
+            # The two field scales are 8 and 16. Align the dense crop to both.
+            low = 16 * np.floor((xyz.min(axis=(0, 1)) - 256) / 16).astype(int)
+            high = 16 * np.ceil((xyz.max(axis=(0, 1)) + 256) / 16).astype(int)
+            window = {"name": name, "direction": direction, "band": band, "row": row, "col": col,
+                      "mesh": folder.name, "crop_xyzwhd": [*low.tolist(), *(high - low).tolist()],
+                      "offset": sign, "start_distance_to_target": round(target_distance, 3)}
+            control = score(xyz, xyz, sign, refs, case["target"])
+            if control["nearest_counts"][case["start"]] != xyz.shape[0] * xyz.shape[1]:
+                raise ValueError(f"Invalid start reference for {window}: {control}")
+            window["control"] = control
+            print("OFFSET_WINDOW " + json.dumps(window), flush=True)
+            windows.append(window)
+        if not any(window["direction"] == direction for window in windows):
+            raise ValueError(f"No fully traced {case['start']} window with separated nearest references")
     plan = {"field_key": key, "manifest": manifest.name, "windows": windows}
     write_json(root / "plan.json", plan)
     return plan, refs
 
 
-def fit_window(root, plan, window, name, weights, dense_cache, steps):
+def fit_window(root, plan, window, name, dense_cache, steps):
     import fit
     import fit_data
     import torch
@@ -205,15 +211,21 @@ def fit_window(root, plan, window, name, weights, dense_cache, steps):
             dense_cache[key] = data
         return dense_cache[key]
 
-    config = json.loads((ROOT / "lasagna/configs/offset.json").read_text())
+    config_path = (Path(__file__).with_name("offset_snap.pr2418.json") if name == "offset-snap-pr2418"
+                   else ROOT / "lasagna/configs/offset.json")
+    config = json.loads(config_path.read_text())
     mesh = root / window["mesh"]
     config["external_surfaces"] = [{"path": str(mesh), "offset": window["offset"]}]
-    config["base"].update(weights)
+    if name in {"offset-dominant", "station-in-refinement"}:
+        config["base"].update(station_n=0.0, ext_offset=1.0)
+    if name == "station-in-refinement":
+        config["base"]["station_n"] = 0.001
+        config["stages"][0]["w_fac"]["station_n"] = 0.0
     config["voxel_size_um"] = 2.399
     if steps is not None:
         for stage in config["stages"]:
             stage["steps"] = min(steps, stage["steps"])
-    out = root / f'roi-{window["band"]}-{name}'
+    out = root / f'{window["name"]}-{name}'
     out.mkdir(exist_ok=True)
     cfg = out / "config.json"
     write_json(cfg, config)
@@ -257,14 +269,15 @@ def main():
     results = []
     for window in plan["windows"]:
         start, _ = read_surface(root / window["mesh"])
+        case = CASES[window["direction"]]
         cache = {}
-        rows = [{"band": window["band"], "config": "start", **window["control"]}]
-        for name, weights in CANDIDATES.items():
+        rows = [{"window": window["name"], "target": case["target"], "config": "start", **window["control"]}]
+        for name in CANDIDATES:
             before = monotonic()
-            grid = fit_window(root, plan, window, name, weights, cache, args.smoke_steps)
-            result = score(grid, start, window["offset"], refs)
+            grid = fit_window(root, plan, window, name, cache, args.smoke_steps)
+            result = score(grid, start, window["offset"], refs, case["target"])
             result["wall_seconds"] = round(monotonic() - before, 2)
-            rows.append({"band": window["band"], "config": name, **result})
+            rows.append({"window": window["name"], "target": case["target"], "config": name, **result})
             print("OFFSET_RESULT " + json.dumps(rows[-1]), flush=True)
         results.extend(rows)
         write_json(root / "results.json", {"plan": plan, "smoke_steps": args.smoke_steps,
@@ -274,12 +287,12 @@ def main():
     if summary:
         lines = ["## Lasagna Offset on PHerc. 139", "",
                  "Assignment uses the nearest vertex among four published reference surfaces.", "",
-                 "| ROI | Config | w029 | w030 | w031 (target) | w032 | Median move toward w031 (voxels) |",
-                 "| --- | --- | ---: | ---: | ---: | ---: | ---: |"]
+                 "| ROI | Target | Config | w029 | w030 | w031 | w032 | Median distance to target (voxels) | Opposed normals |",
+                 "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
         for r in results:
             counts = [str(r["nearest_counts"][name]) for name in MESHES]
-            lines.append("| " + " | ".join([str(r["band"]), r["config"], *counts,
-                                          str(r["median_move_toward_w031"])]) + " |")
+            lines.append("| " + " | ".join([r["window"], r["target"], r["config"], *counts,
+                                          str(r["median_distance_to_target"]), str(r["opposed_vertex_normals"])]) + " |")
         with open(summary, "a", encoding="utf-8") as stream:
             stream.write("\n".join(lines) + "\n")
 

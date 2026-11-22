@@ -9,13 +9,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: vesuvius-offset-cpu-managed
+  group: vesuvius-offset-cpu-holdout
   cancel-in-progress: true
 
 jobs:
   fit:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,11 +59,17 @@ jobs:
             uv pip freeze --python "$venv_python"
             "$venv_python" -c "import fit, fit_data, torch; print(torch.__version__, torch.cuda.is_available())"
           '
-      - name: Compare the three Lasagna Offset configurations
+      - name: Compare Offset configurations in both directions
         timeout-minutes: 15
         run: |
           docker exec offset-bench /tmp/offset-venv/bin/python \
             /workspace/validation/offset/run_offset_cpu.py --work /benchmark/data
+      - name: Plot a registered CT cross-section through the fitted meshes
+        timeout-minutes: 6
+        run: |
+          docker exec offset-bench uv pip install --python /tmp/offset-venv/bin/python matplotlib
+          docker exec offset-bench /tmp/offset-venv/bin/python \
+            /workspace/validation/offset/offset_cross_section.py --work /benchmark/data
       - name: Attach the measurements to the run summary
         if: always()
         run: |
