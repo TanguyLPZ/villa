@@ -87,6 +87,10 @@ def main():
         "base_shape_zyx": doc.get("base_shape_zyx"), "field_groups": doc["groups"],
     }
     print("OFFSET_INPUTS_JSON " + json.dumps(summary), flush=True)
+    print("OFFSET_FIELD_DOCUMENT " + json.dumps(doc), flush=True)
+    for name, group in doc["groups"].items():
+        path = str(PurePosixPath(key).parent / group["zarr"] / ".zarray")
+        print("OFFSET_FIELD_ARRAY " + json.dumps({"name": name, "spec": public_json(path)}), flush=True)
 
 
 if __name__ == "__main__":

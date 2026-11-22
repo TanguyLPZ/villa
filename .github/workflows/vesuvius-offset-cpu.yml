@@ -22,3 +22,23 @@ jobs:
           persist-credentials: false
       - name: Verify public PHerc. 139 mesh and field metadata
         run: python3 validation/offset/offset_inputs.py
+
+  cpu-environment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned public Villa dependency image
+        run: docker pull ghcr.io/scrollprize/villa/volume-cartographer@sha256:9407753393547c422c9689cb8da6b6f4415cc91ad8fa4d89eb476a3df540d7f8
+      - name: Set up the repository CPU environment and import the fitter
+        run: |
+          docker run --rm --cpus 4 -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace/lasagna ghcr.io/scrollprize/villa/volume-cartographer@sha256:9407753393547c422c9689cb8da6b6f4415cc91ad8fa4d89eb476a3df540d7f8 bash -euo pipefail -c '
+              command -v uv >/dev/null || {
+                curl --fail --show-error --silent --location https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
+              }
+              python3 scripts/bootstrap_venv.py --venv /tmp/offset-venv --backend cpu
+              /tmp/offset-venv/bin/python -c "import fit, fit_data, torch; print(torch.__version__, torch.cuda.is_available())"
+            '
