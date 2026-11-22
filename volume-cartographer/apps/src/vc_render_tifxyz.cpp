@@ -993,6 +993,10 @@ int main(int argc, char *argv[])
     float tgt_scale = parsed["scale"].as<float>();
     int group_idx = parsed["group-idx"].as<int>();
     int num_slices = parsed["num-slices"].as<int>();
+    if (num_slices <= 0) {
+        logPrintf(stderr, "Error: --num-slices must be positive\n");
+        return EXIT_FAILURE;
+    }
     double slice_step = parsed["slice-step"].as<float>();
     if (!std::isfinite(slice_step) || slice_step <= 0) { logPrintf(stderr, "Error: --slice-step must be positive\n"); return EXIT_FAILURE; }
 

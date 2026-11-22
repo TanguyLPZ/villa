@@ -73,6 +73,17 @@ class RenderLoggingTests(unittest.TestCase):
     def test_missing_segmentation_preserves_error(self):
         self.assert_logged_error([], "give --segmentation, or --store with one --surface")
 
+    def test_non_positive_slice_count_fails_before_opening_volume(self):
+        zarr_output = self.root / "zarr-output" / "render.zarr"
+        flags = ["-s", str(self.root / "absent.tifxyz"), "--zarr-output", str(zarr_output)]
+        for count in (0, -1):
+            with self.subTest(count=count):
+                self.assert_logged_error(
+                    flags + [f"--num-slices={count}"], "--num-slices must be positive"
+                )
+                self.assertFalse((self.root / "output").exists())
+                self.assertFalse(zarr_output.parent.exists())
+
     def test_caught_volume_error_preserves_diagnostic(self):
         self.assert_logged_error(
             ["-s", str(self.root / "absent.tifxyz")], "Error opening local zarr:"
