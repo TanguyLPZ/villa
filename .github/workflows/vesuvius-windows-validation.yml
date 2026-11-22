@@ -31,7 +31,29 @@ jobs:
           python-version: '3.12'
       - name: Install TIFF decoder
         run: python -m pip install --disable-pip-version-check Pillow
+      - uses: oras-project/setup-oras@v1
+        id: oras
+        continue-on-error: true
+      - name: Restore the VC3D release dependency snapshot
+        id: snapshot
+        if: steps.oras.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $archiveDir = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'vesuvius-snapshot')
+          oras pull ghcr.io/scrollprize/vc3d-deps/windows:sha-d84dfa0745dd2debbcec2126117878b241ffdb7f -o $archiveDir.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'The upstream snapshot could not be downloaded.' }
+          $root = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'vesuvius-msys64')
+          $archive = Join-Path $archiveDir.FullName 'vc3d-windows-ucrt64.7z'
+          & "$env:ProgramFiles\7-Zip\7z.exe" x -y "-o$($root.FullName)" $archive
+          if ($LASTEXITCODE -ne 0) { throw 'The upstream snapshot could not be extracted.' }
+          if (!(Test-Path "$($root.FullName)\ucrt64\bin\g++.exe")) { throw 'The snapshot has no UCRT64 compiler.' }
+          "root=$($root.FullName)" >> $env:GITHUB_OUTPUT
+
       - uses: msys2/setup-msys2@v2
+        id: msys2
+        if: steps.snapshot.outputs.root == ''
         with:
           msystem: UCRT64
           update: true
@@ -39,6 +61,7 @@ jobs:
           install: git
 
       - name: Install UCRT64 build dependencies
+        if: steps.snapshot.outputs.root == ''
         shell: msys2 {0}
         timeout-minutes: 20
         run: |
@@ -59,8 +82,75 @@ jobs:
           done
           exit 1
 
-      - name: Build and test the original and patched VC3D tools
-        shell: msys2 {0}
+      - name: Select the UCRT64 installation
+        shell: pwsh
+        env:
+          SNAPSHOT_ROOT: ${{ steps.snapshot.outputs.root }}
+          CURRENT_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $root = if ($env:SNAPSHOT_ROOT) { $env:SNAPSHOT_ROOT } else { $env:CURRENT_ROOT }
+          if (!(Test-Path "$root\usr\bin\bash.exe")) { throw 'No usable MSYS2 installation.' }
+          "$root\usr\bin" >> $env:GITHUB_PATH
+          'MSYSTEM=UCRT64' >> $env:GITHUB_ENV
+          'CHERE_INVOKING=1' >> $env:GITHUB_ENV
+
+      - name: Configure and build the original VC3D tools
+        shell: bash -leo pipefail {0}
+        env:
+          SNAPSHOT_ROOT: ${{ steps.snapshot.outputs.root }}
+        run: |
+          set -euo pipefail
+          test "$MSYSTEM" = UCRT64
+          if [[ -n "${SNAPSHOT_ROOT:-}" ]]; then
+            pacman -Sy --needed --noconfirm --disable-download-timeout \
+              mingw-w64-ucrt-x86_64-concurrentqueue mingw-w64-ucrt-x86_64-blosc2
+          fi
+          build_dir=volume-cartographer/build/ci-windows-mingw
+          changes=(
+            volume-cartographer/apps/src/vc_render_tifxyz.cpp
+            volume-cartographer/core/test/test_render_tifxyz_logging.py
+            volume-cartographer/core/src/SurfaceMeshing.cpp
+            volume-cartographer/core/include/vc/core/util/SurfaceMeshing.hpp
+            volume-cartographer/core/test/test_surface_meshing.cpp
+          )
+
+          git fetch --depth=1 --no-tags https://github.com/ScrollPrize/villa.git "$BASE_COMMIT"
+          git restore --source="$BASE_COMMIT" -- "${changes[@]}"
+          if [[ -f /ucrt64/include/opencv5/opencv2/geometry/2d.hpp ]]; then
+            quad=volume-cartographer/core/src/QuadSurface.cpp
+            # OpenCV 5 moved these declarations to the geometry module.
+            sed -i '/^#include <opencv2\/imgproc.hpp>/a #include <opencv2/geometry/2d.hpp>' "$quad"
+            grep -F '#include <opencv2/geometry/2d.hpp>' "$quad"
+            git diff -- "$quad"
+          fi
+
+          g++ --version
+          cmake --version
+
+          ucrt_prefix="$(cygpath -am /ucrt64)"
+          blosc2_pc="$(cygpath -u "$(pkg-config --path blosc2)")"
+          test -f "$blosc2_pc"
+          # Normalize any absolute MSYS2 paths in the runner package metadata.
+          sed -i "s@=/ucrt64@=$ucrt_prefix@g; s@-I/ucrt64@-I$ucrt_prefix@g; s@-L/ucrt64@-L$ucrt_prefix@g; s@\"/ucrt64@\"$ucrt_prefix@g" "$blosc2_pc"
+          pkg-config --cflags --libs blosc2
+
+          (
+            cd volume-cartographer
+            cmake --preset ci-windows-mingw -DVC_TESTING=ON -DVC_USE_SCCACHE=OFF
+          )
+          cmake --build "$build_dir" --parallel 4 --target \
+            vc_render_tifxyz vc_cache_root vc_tifxyz2obj vc_obj2tifxyz test_surface_meshing
+
+      - name: Run the original VC3D tools on public papyrus data
+        shell: bash -leo pipefail {0}
+        env:
+          VC_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          "$(cygpath -u "$VC_PYTHON")" validation/vesuvius/check_native.py \
+            volume-cartographer/build/ci-windows-mingw/bin .vesuvius-evidence before
+
+      - name: Build and test the patched VC3D tools
+        shell: bash -leo pipefail {0}
         env:
           VC_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
@@ -77,28 +167,8 @@ jobs:
             volume-cartographer/core/test/test_surface_meshing.cpp
           )
 
-          git fetch --depth=1 --no-tags https://github.com/ScrollPrize/villa.git "$BASE_COMMIT"
-          git restore --source="$BASE_COMMIT" -- "${changes[@]}"
-          g++ --version
-          cmake --version
-
-          ucrt_prefix="$(cygpath -am /ucrt64)"
-          blosc2_pc="$(cygpath -u "$(pkg-config --path blosc2)")"
-          test -f "$blosc2_pc"
-          # Normalize any absolute MSYS2 paths in the runner package metadata.
-          sed -i "s@=/ucrt64@=$ucrt_prefix@g; s@-I/ucrt64@-I$ucrt_prefix@g; s@-L/ucrt64@-L$ucrt_prefix@g; s@\"/ucrt64@\"$ucrt_prefix@g" "$blosc2_pc"
-          pkg-config --cflags --libs blosc2
-
-          (
-            cd volume-cartographer
-            cmake --preset ci-windows-mingw -DVC_TESTING=ON -DVC_USE_SCCACHE=OFF
-          )
-          cmake --build "$build_dir" --parallel 3 --target \
-            vc_render_tifxyz vc_cache_root vc_tifxyz2obj vc_obj2tifxyz test_surface_meshing
-
-          "$python" "$validation/check_native.py" "$build_dir/bin" "$evidence" before
           git restore --source=HEAD -- "${changes[@]}"
-          cmake --build "$build_dir" --parallel 3 --target \
+          cmake --build "$build_dir" --parallel 4 --target \
             vc_render_tifxyz vc_cache_root vc_tifxyz2obj vc_obj2tifxyz test_surface_meshing
           ctest --test-dir "$build_dir" --no-tests=error --output-on-failure -R '^test_surface_meshing$'
           "$python" volume-cartographer/core/test/test_render_tifxyz_logging.py "$build_dir/bin/vc_render_tifxyz.exe"
