@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from sheet_repair import OFFSETS, anchored_paths, fit_strip, interpolate_strip
+from sheet_repair import OFFSETS, anchored_paths, cubic_from_four_columns, fit_strip, interpolate_strip, trace_continuous
 
 
 class SheetRepairTest(unittest.TestCase):
@@ -40,6 +40,19 @@ class SheetRepairTest(unittest.TestCase):
         np.testing.assert_array_equal(connected[:, self.stop:], self.surface[:, self.stop:])
         self.assertGreaterEqual(float(connected[:, 8, 2].min()), 106)
         self.assertEqual(review.shape, (5, 12))
+
+    def test_no_ct_contrast_leaves_geometry_intact_and_flags_all_points(self):
+        _, cubic = interpolate_strip(self.observed, self.start, self.stop)
+        result, review = trace_continuous(cubic, self.start, self.stop,
+                                          lambda xyz: np.zeros(xyz.shape[:-1], dtype=np.float32))
+        np.testing.assert_array_equal(result, cubic)
+        self.assertTrue(review.all())
+
+    def test_wider_tangent_measurement_preserves_a_plane(self):
+        observed = self.surface.copy()
+        observed[:, 5:13] = np.nan
+        result = cubic_from_four_columns(observed, 5, 13)
+        np.testing.assert_allclose(result, self.surface, atol=2e-5)
 
 
 if __name__ == "__main__":

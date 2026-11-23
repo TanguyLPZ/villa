@@ -33,3 +33,7 @@ jobs:
         run: |
           "$RUNNER_TEMP/repair-venv/bin/python" benchmark.py \
             --inputs "$RUNNER_TEMP/repair-inputs" --out "$RUNNER_TEMP/repair-evidence" --emit
+      - name: Check generalization on other published windings
+        run: |
+          "$RUNNER_TEMP/repair-venv/bin/python" benchmark.py \
+            --inputs "$RUNNER_TEMP/repair-inputs" --out "$RUNNER_TEMP/repair-holdout" --split holdout --emit

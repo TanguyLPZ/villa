@@ -17,7 +17,7 @@ import tifffile
 from ct_reader import CTReader
 from evidence import write_evidence
 from public_data import BUCKET, CT, MESHES, MESH_FILES, SCAN, VOXEL_UM, fetch
-from sheet_repair import fit_strip, normals
+from sheet_repair import cubic_from_four_columns, fit_strip, normals, trace_continuous
 
 
 # Use the six interior locations already traced on the volume, fixed before scoring.
@@ -27,7 +27,9 @@ CROPS = {
 }
 SHAPE = (14, 52)
 WIDTHS = (8, 16, 24)
-METHODS = ("linear", "cubic", "ct_local", "ct_connected")
+METHODS = ("linear", "cubic", "cubic_4col", "ct_local", "ct_connected", "ct_continuous")
+HOLDOUT_COLUMNS = {"w029": .46, "w032": .52}
+HOLDOUT_ROWS = (.17, .50, .83)
 
 
 def log(tag, payload):
@@ -60,9 +62,10 @@ def read_inputs(directory):
     return inputs, files
 
 
-def select_crop(valid, origin):
+def select_crop(valid, origin, search_radius):
     height, width = SHAPE
-    offsets = [(i, j) for i in range(-12, 13, 4) for j in range(-12, 13, 4)]
+    candidates = range(-search_radius, search_radius + 1, 4)
+    offsets = [(i, j) for i in candidates for j in candidates]
     offsets.sort(key=lambda pair: (pair[0] ** 2 + pair[1] ** 2, pair))
     for i, j in offsets:
         row, col = origin[0] + i, origin[1] + j
@@ -70,6 +73,14 @@ def select_crop(valid, origin):
         if window.shape == SHAPE and window.all():
             return row, col
     raise ValueError(f"No complete interior crop near {origin}, mask shape {valid.shape}")
+
+
+def crop_origins(inputs, split):
+    if split == "core":
+        return CROPS
+    return {name: [(round((inputs[name][1].shape[0] - SHAPE[0]) * row_fraction),
+                    round((inputs[name][1].shape[1] - SHAPE[1]) * column_fraction))
+                   for row_fraction in HOLDOUT_ROWS] for name, column_fraction in HOLDOUT_COLUMNS.items()}
 
 
 def score(prediction, truth, directions, references, name):
@@ -101,19 +112,18 @@ def run(args):
     args.out.mkdir(parents=True, exist_ok=True)
     inputs, files = read_inputs(args.inputs)
     cases = []
-    for name, origins in CROPS.items():
+    for name, origins in crop_origins(inputs, args.split).items():
         for number, origin in enumerate(origins, 1):
-            row, col = select_crop(inputs[name][1], origin)
+            row, col = select_crop(inputs[name][1], origin, 12 if args.split == "core" else 80)
             cases.append({"id": f"{name}-{number}", "mesh": name, "row": row, "col": col})
-    log("PLAN", {"cases": cases, "shape": SHAPE, "widths": WIDTHS, "voxel_um": VOXEL_UM})
+    log("PLAN", {"split": args.split, "cases": cases, "shape": SHAPE, "widths": WIDTHS, "voxel_um": VOXEL_UM})
 
     # Full references, including the strip, are used only to score completed predictions.
     references = {name: cKDTree(surface[valid]) for name, (surface, valid, _) in inputs.items()}
     reader = CTReader()
     measurements = {width: {method: [] for method in METHODS} for width in WIDTHS}
-    records, accepted = [], []
-    failed = np.zeros(3, dtype=int)
-    num_accepted = 0
+    records = []
+    review_counts = {method: np.zeros(4, dtype=np.int64) for method in ("ct_connected", "ct_continuous")}
     started = monotonic()
     for case in cases:
         name, row, col = case["mesh"], case["row"], case["col"]
@@ -127,44 +137,43 @@ def run(args):
             observed = truth.copy()
             observed[hidden] = np.nan
             before = monotonic()
-            repaired, uncertain = fit_strip(observed, start, stop, reader.sample)
+            repaired, connected_review = fit_strip(observed, start, stop, reader.sample)
+            repaired["cubic_4col"] = cubic_from_four_columns(observed, start, stop)
+            repaired["ct_continuous"], continuous_review = trace_continuous(repaired["cubic"], start, stop, reader.sample)
             seconds = monotonic() - before
             scores = {}
-            for method, prediction in repaired.items():
+            errors = {}
+            for method in METHODS:
+                prediction = repaired[method]
                 for retained in (np.s_[:, :start], np.s_[:, stop:]):
                     if not np.array_equal(prediction[retained], observed[retained]):
                         raise ValueError(f"{method} changed a visible vertex")
                 result = score(prediction[hidden], truth[hidden], direction[hidden], references, name)
                 measurements[width][method].append(result)
                 scores[method] = metrics(tuple(item.ravel() for item in result))
-            comparable = ~uncertain
-            num_accepted += int(comparable.sum())
-            connected_error = measurements[width]["ct_connected"][-1][0]
-            cubic_error = measurements[width]["cubic"][-1][0]
-            failed += (int((connected_error[comparable] > 4).sum()),
-                       int((connected_error[uncertain] > 4).sum()), int(uncertain.sum()))
-            if comparable.any():
-                accepted.append(np.stack((cubic_error[comparable], connected_error[comparable])))
-            record = {**case, "width": width, "seconds_with_shared_ct_cache": seconds,
-                      "review_vertices": int(uncertain.sum()), "methods": scores}
+                errors[method] = result[0]
+            for method, flag in (("ct_connected", connected_review), ("ct_continuous", continuous_review)):
+                large_error = errors[method] > 4
+                review_counts[method] += (int((~flag).sum()), int((large_error & ~flag).sum()),
+                                          int(flag.sum()), int((large_error & flag).sum()))
+            record = {**case, "split": args.split, "width": width, "seconds_with_shared_ct_cache": seconds,
+                      "review_vertices": {"ct_connected": int(connected_review.sum()),
+                                          "ct_continuous": int(continuous_review.sum())}, "methods": scores}
             records.append(record)
             log("CASE", record)
-            if case["id"] == "w030-1" and width == WIDTHS[-1]:
-                write_evidence(args.out, reader.sample, case, meta, start, stop, truth, repaired, uncertain)
+            if case == cases[0] and width == WIDTHS[-1]:
+                write_evidence(args.out, reader.sample, case, meta, start, stop, truth, repaired, continuous_review)
 
     per_width = {width: {method: metrics(combine(chunks)) for method, chunks in by_method.items()}
                  for width, by_method in measurements.items()}
     pooled = {method: metrics(combine([chunk for by_method in measurements.values() for chunk in by_method[method]]))
               for method in METHODS}
-    review = {"threshold_normal_error_vox": 4, "accepted_count": num_accepted,
-              "accepted_over_threshold": int(failed[0]), "flagged_over_threshold": int(failed[1]),
-              "flagged_count": int(failed[2])}
-    if accepted:
-        review["accepted_cubic_mae_vox"], review["accepted_connected_mae_vox"] = (
-            np.concatenate(accepted, axis=1).mean(axis=1).tolist()
-        )
+    review_headers = ("accepted_count", "accepted_over_threshold", "flagged_count", "flagged_over_threshold")
+    review = {"threshold_normal_error_vox": 4,
+              **{method: dict(zip(review_headers, counts.tolist(), strict=True))
+                 for method, counts in review_counts.items()}}
     stats = {"ct_url": f"{BUCKET}/{CT}", "scan": SCAN, "voxel_um": VOXEL_UM,
-             "git_sha": os.environ.get("GITHUB_SHA"), "sources": files, "shape": SHAPE,
+             "git_sha": os.environ.get("GITHUB_SHA"), "sources": files, "shape": SHAPE, "split": args.split,
              "cases": records, "by_width": per_width, "pooled": pooled, "review": review,
              "downloaded_ct_chunks": reader.blocks_read, "downloaded_ct_bytes": reader.bytes_read,
              "seconds_with_ct_io_and_plot": monotonic() - started}
@@ -176,28 +185,29 @@ def run(args):
                                              "seconds_with_ct_io_and_plot")})
     if "GITHUB_STEP_SUMMARY" in os.environ:
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-            summary.write("## PHerc. 139 withheld-strip benchmark\n\n")
+            summary.write(f"## PHerc. 139 withheld-strip benchmark ({args.split})\n\n")
             summary.write("| Method | Mean absolute normal error (voxels) | P90 (voxels) | Nearest winding differs |\n")
             summary.write("| --- | ---: | ---: | ---: |\n")
             for method, values in pooled.items():
                 summary.write(f"| {method} | {values['normal_mae_vox']:.3f} | {values['normal_p90_vox']:.3f} "
                               f"| {values['wrong_winding']} / {values['vertices']} |\n")
     if args.emit:
-        archive = args.out.parent / "vesuvius-sheet-repair-evidence.zip"
+        archive = args.out.parent / f"vesuvius-sheet-repair-{args.split}-evidence.zip"
         with ZipFile(archive, "w", compression=ZIP_DEFLATED) as output:
             for path in sorted(args.out.rglob("*")):
                 if path.is_file():
                     output.write(path, arcname=path.relative_to(args.out))
         payload = archive.read_bytes()
-        log("ZIP", {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()})
+        log("ZIP", {"split": args.split, "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()})
         encoded = base64.b64encode(payload).decode("ascii")
         for offset in range(0, len(encoded), 3000):
-            print(f"REPAIR_DATA {offset:08d} {encoded[offset:offset + 3000]}", flush=True)
+            print(f"REPAIR_DATA {args.split} {offset:08d} {encoded[offset:offset + 3000]}", flush=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inputs", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--split", choices=("core", "holdout"), default="core")
     parser.add_argument("--emit", action="store_true", help="Include the evidence archive in CI logs")
     run(parser.parse_args())
