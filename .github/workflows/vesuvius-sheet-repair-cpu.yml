@@ -15,10 +15,21 @@ concurrency:
 jobs:
   benchmark:
     runs-on: ubuntu-24.04
-    timeout-minutes: 4
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: validation/sheet_repair
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - name: Verify public CT metadata and reference meshes
-        run: python3 validation/sheet_repair/public_data.py
+      - name: Set up pinned CPU dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/repair-venv"
+          "$RUNNER_TEMP/repair-venv/bin/python" -m pip install numpy==2.2.6 scipy==1.15.3 tifffile==2025.5.10 matplotlib==3.10.3
+      - name: Verify masked geometry and anchored paths
+        run: '"$RUNNER_TEMP/repair-venv/bin/python" -m unittest -v'
+      - name: Score withheld strips on the public CT
+        run: |
+          "$RUNNER_TEMP/repair-venv/bin/python" benchmark.py \
+            --inputs "$RUNNER_TEMP/repair-inputs" --out "$RUNNER_TEMP/repair-evidence" --emit
