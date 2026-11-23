@@ -62,8 +62,8 @@ def write_evidence(out, sample, case, source, start, stop, truth, repaired, unce
                  f"Curved CT section at mesh row {case['row'] + middle} • {VOXEL_UM} µm/voxel")
     levels = np.percentile(section, [2, 98])
     extent = [-.125, columns[-1] + .125, offsets[0] - .25, offsets[-1] + .25]
-    for ax, method, title in zip(axs, ("cubic", "ct_continuous"),
-                                 ("Cubic interpolation", "CT tracing between adjacent profiles"), strict=True):
+    for ax, method, title in zip(axs, ("cubic_4col", "neighbor_guided"),
+                                 ("Cubic interpolation (four intervals)", "Local relief from adjacent winding"), strict=True):
         ax.imshow(section, cmap="gray", vmin=levels[0], vmax=levels[1], origin="lower",
                   extent=extent, aspect="auto", interpolation="nearest")
         displacement = np.sum((repaired[method][middle, cut] - rail[cut]) * direction[cut], axis=-1)
@@ -76,7 +76,7 @@ def write_evidence(out, sample, case, source, start, stop, truth, repaired, unce
         ax.legend(loc="upper right", fontsize=8)
     if uncertain[middle].any():
         axs[1].scatter(columns[cut][uncertain[middle]], np.full(uncertain[middle].sum(), -44),
-                       color="#e779ee", marker="|", s=40, label="Review flag")
+                       color="#e779ee", marker="|", s=40, label="Displacement below 1 voxel")
         axs[1].legend(loc="upper right", fontsize=8)
     axs[1].set_xlabel(f"Mesh column within crop • Max lateral offset of projected trace = {off_plane.max():.2f} voxels")
     fig.savefig(out / "PHerc0139_sheet_repair.png", dpi=105)

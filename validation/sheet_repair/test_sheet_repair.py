@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from sheet_repair import OFFSETS, anchored_paths, cubic_from_four_columns, fit_strip, interpolate_strip, trace_continuous
+from winding_guide import Winding, guide_strip
 
 
 class SheetRepairTest(unittest.TestCase):
@@ -53,6 +54,18 @@ class SheetRepairTest(unittest.TestCase):
         observed[:, 5:13] = np.nan
         result = cubic_from_four_columns(observed, 5, 13)
         np.testing.assert_allclose(result, self.surface, atol=2e-5)
+
+    def test_donor_recovers_shared_relief_without_moving_anchors(self):
+        _, cubic = interpolate_strip(self.observed, self.start, self.stop)
+        donor = self.surface.copy()
+        phase = np.clip((donor[..., 0] - 108) / 52, 0, 1)
+        donor[..., 2] += 24 + 8 * np.sin(np.pi * phase) ** 2
+        repaired, transferred = guide_strip(cubic, self.start, self.stop,
+                                             [Winding(donor, np.ones(donor.shape[:2], dtype=bool))])
+        np.testing.assert_array_equal(repaired[:, :self.start], self.surface[:, :self.start])
+        np.testing.assert_array_equal(repaired[:, self.stop:], self.surface[:, self.stop:])
+        self.assertGreaterEqual(float(repaired[:, 8, 2].min()), 104)
+        self.assertTrue(transferred[:, 5].all())
 
 
 if __name__ == "__main__":

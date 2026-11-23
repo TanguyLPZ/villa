@@ -11,13 +11,13 @@ from time import monotonic
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
-from scipy.spatial import cKDTree
 import tifffile
 
 from ct_reader import CTReader
 from evidence import write_evidence
 from public_data import BUCKET, CT, MESHES, MESH_FILES, SCAN, VOXEL_UM, fetch
 from sheet_repair import cubic_from_four_columns, fit_strip, normals, trace_continuous
+from winding_guide import Winding, guide_strip
 
 
 # Use the six interior locations already traced on the volume, fixed before scoring.
@@ -27,9 +27,10 @@ CROPS = {
 }
 SHAPE = (14, 52)
 WIDTHS = (8, 16, 24)
-METHODS = ("linear", "cubic", "cubic_4col", "ct_local", "ct_connected", "ct_continuous")
+METHODS = ("linear", "cubic", "cubic_4col", "ct_local", "ct_connected", "ct_continuous", "neighbor_guided")
 HOLDOUT_COLUMNS = {"w029": .46, "w032": .52}
 HOLDOUT_ROWS = (.17, .50, .83)
+DONORS = {"w029": ("w030",), "w030": ("w029", "w031"), "w031": ("w030", "w032"), "w032": ("w031",)}
 
 
 def log(tag, payload):
@@ -118,8 +119,8 @@ def run(args):
             cases.append({"id": f"{name}-{number}", "mesh": name, "row": row, "col": col})
     log("PLAN", {"split": args.split, "cases": cases, "shape": SHAPE, "widths": WIDTHS, "voxel_um": VOXEL_UM})
 
-    # Full references, including the strip, are used only to score completed predictions.
-    references = {name: cKDTree(surface[valid]) for name, (surface, valid, _) in inputs.items()}
+    windings = {name: Winding(surface, valid) for name, (surface, valid, _) in inputs.items()}
+    references = {name: winding.tree for name, winding in windings.items()}
     reader = CTReader()
     measurements = {width: {method: [] for method in METHODS} for width in WIDTHS}
     records = []
@@ -140,6 +141,9 @@ def run(args):
             repaired, connected_review = fit_strip(observed, start, stop, reader.sample)
             repaired["cubic_4col"] = cubic_from_four_columns(observed, start, stop)
             repaired["ct_continuous"], continuous_review = trace_continuous(repaired["cubic"], start, stop, reader.sample)
+            # The target winding, including its hidden vertices, is used only in scoring.
+            repaired["neighbor_guided"], transferred = guide_strip(repaired["cubic_4col"], start, stop,
+                                                                   [windings[donor] for donor in DONORS[name]])
             seconds = monotonic() - before
             scores = {}
             errors = {}
@@ -157,12 +161,13 @@ def run(args):
                 review_counts[method] += (int((~flag).sum()), int((large_error & ~flag).sum()),
                                           int(flag.sum()), int((large_error & flag).sum()))
             record = {**case, "split": args.split, "width": width, "seconds_with_shared_ct_cache": seconds,
+                      "transferred_vertices": int(transferred.sum()), "donors": DONORS[name],
                       "review_vertices": {"ct_connected": int(connected_review.sum()),
                                           "ct_continuous": int(continuous_review.sum())}, "methods": scores}
             records.append(record)
             log("CASE", record)
             if case == cases[0] and width == WIDTHS[-1]:
-                write_evidence(args.out, reader.sample, case, meta, start, stop, truth, repaired, continuous_review)
+                write_evidence(args.out, reader.sample, case, meta, start, stop, truth, repaired, ~transferred)
 
     per_width = {width: {method: metrics(combine(chunks)) for method, chunks in by_method.items()}
                  for width, by_method in measurements.items()}
