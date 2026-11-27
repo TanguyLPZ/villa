@@ -1,0 +1,57 @@
+name: Validate VC3D OBJ quad imports
+
+on:
+  push:
+    branches: [vesuvius-obj-polygons-cpu]
+    paths: [.github/workflows/vesuvius-obj-polygons-cpu.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      BASE: e5707e413e61fc3e67af6b98ea5bd713fe0110d1
+      BUILDER: ghcr.io/scrollprize/villa/volume-cartographer@sha256:9407753393547c422c9689cb8da6b6f4415cc91ad8fa4d89eb476a3df540d7f8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 10
+      - name: Fetch and verify three public papyrus segments
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p quad-results/input/w035.tifxyz
+          base_url=https://vesuvius-challenge-open-data.s3.amazonaws.com/PHerc0139/segments/20260317000000-w035_2026031718/mesh/20260317000000-on-20250728140407-9.362um.tifxyz
+          for file in meta.json x.tif y.tif z.tif; do
+            curl --fail --location --retry 3 "$base_url/$file" -o "quad-results/input/w035.tifxyz/$file"
+          done
+          base_url=https://raw.githubusercontent.com/Nieuwlaar/pherc343-first-letters/e8370f1f88a211166056df62ea6fcfffe4a1063e/outputs
+          for name in w047_R5B2_z9500-11000 w048_R5B2_z9500-11000; do
+            mkdir -p "quad-results/input/$name.tifxyz"
+            for file in meta.json x.tif y.tif z.tif; do
+              curl --fail --location --retry 3 "$base_url/$name.tifxyz/$file" -o "quad-results/input/$name.tifxyz/$file"
+            done
+          done
+          cd quad-results/input
+          sha256sum -c ../../vesuvius-validation/inputs.sha256
+      - name: Build and compare the two revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$BUILDER"
+          docker run --rm --mount "type=bind,src=$PWD,dst=/src" -w /src \
+            -e BASE="$BASE" -e PATCHED="$GITHUB_SHA" "$BUILDER" \
+            bash /src/vesuvius-validation/run.sh
+      - name: Retain measurements and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: papyrus-obj-quad-results
+          path: |
+            quad-results/*/*.json
+            quad-results/*/*.log
