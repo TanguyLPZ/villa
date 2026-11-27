@@ -103,6 +103,78 @@ LiftedUVs liftGridUVs(const GridMesh& fine, const cv::Mat_<cv::Vec3f>& coarsePoi
     return lifted;
 }
 
+namespace {
+struct ObjCorner {
+    int vertex;
+    int uv;
+};
+
+int objIndex(int value, std::size_t count)
+{
+    if (value < 0) return static_cast<int>(count) + value;
+    return value - 1;  // OBJ uses 1-based indices. Zero denotes a missing field here.
+}
+
+// Clip ears in the same UV plane that the two rasterizers sample. Start at
+// corner 1 so a convex quad splits as (0,1,2), (0,2,3).
+bool appendUvPolygon(std::vector<ObjCorner>& corners, UvMesh& mesh)
+{
+    const auto emit = [&](const ObjCorner& a, const ObjCorner& b, const ObjCorner& c) {
+        mesh.faces.push_back({{a.vertex, b.vertex, c.vertex}, {a.uv, b.uv, c.uv}});
+    };
+    if (corners.size() < 3) return true;
+    if (corners.size() == 3) {
+        emit(corners[0], corners[1], corners[2]);
+        return true;
+    }
+    for (const auto& corner : corners) {
+        if (corner.uv < 0) return true;  // No complete texture map to rasterize.
+        if (static_cast<std::size_t>(corner.uv) >= mesh.uvs.size()) return false;
+    }
+
+    const auto turn = [&](std::size_t a, std::size_t b, std::size_t c) {
+        const cv::Vec2d p = mesh.uvs[corners[a].uv];
+        const cv::Vec2d u = cv::Vec2d(mesh.uvs[corners[b].uv]) - p;
+        const cv::Vec2d v = cv::Vec2d(mesh.uvs[corners[c].uv]) - p;
+        return u[0] * v[1] - u[1] * v[0];
+    };
+    double area = 0;
+    for (std::size_t i = 1; i + 1 < corners.size(); ++i) area += turn(0, i, i + 1);
+    if (area == 0) {
+        // Collinear UVs contribute no samples. A non-collinear loop with
+        // zero signed area cannot define a simple polygon.
+        for (std::size_t i = 1; i + 1 < corners.size(); ++i)
+            if (turn(0, i, i + 1) != 0) return false;
+        return true;
+    }
+    const double sign = area > 0 ? 1 : -1;
+    while (corners.size() > 3) {
+        const auto n = corners.size();
+        bool clipped = false;
+        for (std::size_t a = 0; a < n; ++a) {
+            const auto b = (a + 1) % n, c = (a + 2) % n;
+            if (sign * turn(a, b, c) <= 0) continue;
+            bool containsCorner = false;
+            for (std::size_t k = 0; k < n; ++k) {
+                if (k == a || k == b || k == c) continue;
+                if (sign * turn(a, b, k) >= 0 && sign * turn(b, c, k) >= 0 && sign * turn(c, a, k) >= 0) {
+                    containsCorner = true;
+                    break;
+                }
+            }
+            if (containsCorner) continue;
+            emit(corners[a], corners[b], corners[c]);
+            corners.erase(corners.begin() + b);
+            clipped = true;
+            break;
+        }
+        if (!clipped) return false;
+    }
+    emit(corners[0], corners[1], corners[2]);
+    return true;
+}
+} // namespace
+
 bool readUvObj(const std::string& path, UvMesh& mesh)
 {
     std::ifstream file(path);
@@ -112,7 +184,10 @@ bool readUvObj(const std::string& path, UvMesh& mesh)
     }
 
     std::string line;
+    std::vector<ObjCorner> corners;
+    std::size_t lineNumber = 0;
     while (std::getline(file, line)) {
+        ++lineNumber;
         if (line.empty() || line[0] == '#')
             continue;
 
@@ -131,29 +206,22 @@ bool readUvObj(const std::string& path, UvMesh& mesh)
             mesh.uvs.push_back(uv);
         }
         else if (prefix == "f") {
-            UvFace face;
-            std::string vertex_str;
-            int idx = 0;
-
-            while (iss >> vertex_str && idx < 3) {
-                // Parse vertex/texture/normal indices
-                std::replace(vertex_str.begin(), vertex_str.end(), '/', ' ');
-                std::istringstream viss(vertex_str);
-
-                viss >> face.v[idx];
-                face.v[idx]--; // Convert to 0-based
-
-                if (viss >> face.vt[idx]) {
-                    face.vt[idx]--; // Convert to 0-based
-                } else {
-                    face.vt[idx] = -1;
+            corners.clear();
+            std::string token;
+            while (iss >> token && token[0] != '#') {
+                std::istringstream indices(token);
+                int vertex = 0, uv = 0;
+                indices >> vertex;
+                if (indices.peek() == '/') {
+                    indices.get();
+                    if (indices.peek() != '/') indices >> uv;
                 }
-
-                idx++;
+                corners.push_back({objIndex(vertex, mesh.vertices.size()), objIndex(uv, mesh.uvs.size())});
             }
-
-            if (idx == 3) {
-                mesh.faces.push_back(face);
+            if (!appendUvPolygon(corners, mesh)) {
+                std::cerr << path << ':' << lineNumber << ": cannot triangulate this UV polygon. "
+                          << "Check its UV indices or triangulate the face before export.\n";
+                return false;
             }
         }
     }

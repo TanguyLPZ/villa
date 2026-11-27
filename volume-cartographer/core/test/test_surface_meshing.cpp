@@ -110,29 +110,33 @@ TEST_CASE("liftGridUVs is exact in grid space when border rows and columns are i
     for (std::size_t i = 0; i < fine.cells.size(); ++i) CHECK(lifted.valid[i]);
 }
 
-TEST_CASE("readUvObj reads vertices, UVs and the first three corners of each face")
+TEST_CASE("readUvObj preserves triangles and splits a textured quad along its first diagonal")
 {
     const auto path = std::filesystem::temp_directory_path() / "vc_test_read_uv_obj.obj";
     std::ofstream(path) << "# comment\n"
                            "v 1 2 3\nv 4.5 5 6\nv 7 8 9.25\nv 10 11 12\n"
-                           "vt 0.5 0.25\nvt 1 0\nvn 0 0 1\n"
+                           "vt 0.5 0.25\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\n"
                            "f 1/1/1 2/2/1 3/1/1\n"
-                           "f 4 3 2\n"
+                           "f 4//1 3 2\n"
                            "f 1/2 2/1\n"
-                           "f 1/1 2/2 3/1 4/2\n";
+                           "f 1/1 2/2 3/3 4/4 # original grid quad\n";
     UvMesh mesh;
     REQUIRE(readUvObj(path.string(), mesh));
     CHECK(mesh.vertices.size() == 4);
     CHECK(mesh.vertices[1] == cv::Vec3f(4.5f, 5.f, 6.f));
-    CHECK(mesh.uvs.size() == 2);
+    CHECK(mesh.uvs.size() == 4);
     CHECK(mesh.uvs[0] == cv::Vec2f(0.5f, 0.25f));
-    REQUIRE(mesh.faces.size() == 3);
+    REQUIRE(mesh.faces.size() == 4);
     CHECK(mesh.faces[0].v[2] == 2);
     CHECK(mesh.faces[0].vt[1] == 1);
     CHECK(mesh.faces[1].v[0] == 3);
     CHECK(mesh.faces[1].vt[0] == -1);
     CHECK(mesh.faces[2].v[2] == 2);
-    CHECK(mesh.faces[2].vt[2] == 0);
+    CHECK(mesh.faces[2].vt[2] == 2);
+    CHECK(mesh.faces[3].v[0] == 0);
+    CHECK(mesh.faces[3].v[1] == 2);
+    CHECK(mesh.faces[3].v[2] == 3);
+    CHECK(mesh.faces[3].vt[2] == 3);
 
     std::ofstream(path) << "v 1 2 3\nv 4 5 6\nv 7 8 9\nf 1 2 3\n";
     UvMesh untextured;
@@ -140,4 +144,28 @@ TEST_CASE("readUvObj reads vertices, UVs and the first three corners of each fac
     std::filesystem::remove(path);
     UvMesh missing;
     CHECK_FALSE(readUvObj(path.string(), missing));
+}
+
+TEST_CASE("readUvObj keeps concave UV polygons inside their outline in both windings")
+{
+    const auto path = std::filesystem::temp_directory_path() / "vc_test_concave_uv_obj.obj";
+    for (bool reverse : {false, true}) {
+        std::ofstream(path) << "v 0 0 3\nv 1 0 3\nv 1 1 3\nv 0.5 0.2 3\nv 0 1 3\n"
+                               "vt 0 0\nvt 4 0\nvt 4 4\nvt 2 1\nvt 0 4\n"
+                            << (reverse ? "f -4/-1 -5/-2 -1/-3 -2/-4 -3/-5\n" : "f 3/-5 4/-4 5/-3 1/-2 2/-1\n");
+        UvMesh mesh;
+        REQUIRE(readUvObj(path.string(), mesh));
+        REQUIRE(mesh.faces.size() == 3);
+        double twiceArea = 0;
+        for (const auto& face : mesh.faces) {
+            for (int k = 0; k < 3; ++k) CHECK(face.v[k] == (face.vt[k] + 2) % 5);
+            const auto u = mesh.uvs[face.vt[1]] - mesh.uvs[face.vt[0]];
+            const auto v = mesh.uvs[face.vt[2]] - mesh.uvs[face.vt[0]];
+            const double cross = u[0] * v[1] - u[1] * v[0];
+            CHECK((reverse ? -cross : cross) > 0);
+            twiceArea += cross;
+        }
+        CHECK(twiceArea == (reverse ? -20 : 20));
+    }
+    std::filesystem::remove(path);
 }

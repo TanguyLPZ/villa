@@ -61,9 +61,11 @@ struct UvMesh {
 };
 
 // Reads the v, vt and f statements of an OBJ file into `mesh` and prints their
-// counts. A face keeps its first three corners, each "v/vt/..." with vt -1 for
-// a corner without one; a face with fewer corners is skipped. Returns false
-// when the file cannot be opened (printing why) or has no vertices, faces or UVs.
+// counts. Simple UV polygons are triangulated, preserving winding and each
+// corner's vertex/UV pair. Faces with fewer than three corners and polygons
+// without a complete UV map are skipped. Triangle corners without UVs keep
+// vt = -1. Returns false if the file cannot be opened, a polygon cannot be
+// triangulated, or the mesh has no vertices, UVs or triangles.
 bool readUvObj(const std::string& path, UvMesh& mesh);
 
 // Rasterizes a UV-mapped triangle mesh onto a regular grid spanning its UV
