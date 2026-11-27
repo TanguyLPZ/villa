@@ -3,7 +3,6 @@ name: Validate VC3D OBJ quad imports
 on:
   push:
     branches: [vesuvius-obj-polygons-cpu]
-    paths: [.github/workflows/vesuvius-obj-polygons-cpu.yml]
   workflow_dispatch:
 
 permissions:
